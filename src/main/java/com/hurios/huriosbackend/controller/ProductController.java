@@ -21,11 +21,33 @@ public class ProductController {
     private final ProductRepository productRepository;
     private final ValidationService validationService;
     private final ProductService productService;
-    public ProductController(ProductRepository productRepository, ValidationService validationService,ProductService productService) {
+    private final com.hurios.huriosbackend.service.CatalogSyncService catalogSyncService;
+
+    public ProductController(ProductRepository productRepository, 
+                             ValidationService validationService,
+                             ProductService productService,
+                             com.hurios.huriosbackend.service.CatalogSyncService catalogSyncService) {
         this.productRepository = productRepository;
         this.validationService = validationService;
-        this.productService=productService;
+        this.productService = productService;
+        this.catalogSyncService = catalogSyncService;
     }
+
+    // POST /products/sync-api -> Sincroniza y puebla automáticamente productos de repuestos vía API
+    @PostMapping("/sync-api")
+    public ResponseEntity<?> syncCatalogFromApi() {
+        try {
+            var synced = catalogSyncService.syncCatalogFromAI();
+            return ResponseEntity.ok(Map.of(
+                    "message", "Catálogo sincronizado exitosamente con la API",
+                    "nuevos_productos", synced.size(),
+                    "total_productos", productRepository.count()
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
     // GET /products -> Lista de todos los productos
     @GetMapping
     public ResponseEntity<?> all() {

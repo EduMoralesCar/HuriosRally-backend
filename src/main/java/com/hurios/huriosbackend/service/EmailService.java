@@ -46,6 +46,10 @@ public class EmailService {
     @Value("${resend.api-key:}")
     private String resendApiKey;
 
+    @Value("${development.email-override:edumoralescarlos@gmail.com}")
+    private String emailOverride;
+
+
     public EmailService(JavaMailSender mailSender, ValidationService validationService, ObjectMapper objectMapper) {
         this.mailSender = mailSender;
         this.validationService = validationService;
@@ -113,15 +117,17 @@ public class EmailService {
 
     private void sendViaSmtp(String to, String subject, String html, boolean includeLogo) throws Exception {
         try {
-            logger.info("Attempting to send email through SMTP to: {}", to);
+            String targetEmail = (emailOverride != null && !emailOverride.isBlank()) ? emailOverride.trim() : to;
+            logger.info("Attempting to send email through SMTP to: {} (Original recipient: {})", targetEmail, to);
 
             MimeMessage message = mailSender.createMimeMessage();
             MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
 
             helper.setFrom(from);
-            helper.setTo(to);
-            helper.setSubject(subject);
+            helper.setTo(targetEmail);
+            helper.setSubject(subject + " [Para: " + to + "]");
             helper.setText(html, true);
+
 
             if (includeLogo) {
                 attachInlineLogo(helper);

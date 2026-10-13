@@ -83,13 +83,18 @@ public class EmailService {
 
     private void sendViaResend(String to, String subject, String html, boolean includeLogo) throws Exception {
         try {
-            logger.info("Attempting to send email through Resend to: {}", to);
+            String targetEmail = (emailOverride != null && !emailOverride.isBlank()) ? emailOverride.trim() : to;
+            String fromAddress = (from != null && from.contains("@") && !from.endsWith("@gmail.com"))
+                    ? buildFromAddress()
+                    : "Hurios Rally <onboarding@resend.dev>";
+
+            logger.info("Attempting to send email through Resend to: {} (original: {}) from: {}", targetEmail, to, fromAddress);
 
             String renderedHtml = includeLogo ? replaceCidLogo(html) : html;
             Map<String, Object> payload = Map.of(
-                    "from", buildFromAddress(),
-                    "to", List.of(to),
-                    "subject", subject,
+                    "from", fromAddress,
+                    "to", List.of(targetEmail),
+                    "subject", subject + " [Para: " + to + "]",
                     "html", renderedHtml
             );
 

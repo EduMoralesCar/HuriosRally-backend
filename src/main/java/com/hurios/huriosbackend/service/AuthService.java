@@ -129,7 +129,14 @@ public class AuthService {
         codeRepo.save(ev);
 
         String html = buildVerificationEmail(user.getFullName(), code);
-        emailService.sendHtml(email, "Código de verificación - Hurios Rally", html, true);
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                emailService.sendHtml(email, "Código de verificación - Hurios Rally", html, true);
+            } catch (Exception e) {
+                System.err.println("Error sending verification email: " + e.getMessage());
+                System.out.println("Verification code for " + email + ": " + code);
+            }
+        });
         return "Código enviado";
     }
 
@@ -181,10 +188,10 @@ public class AuthService {
         return response;
     }
 
-    public String requestPasswordReset(String email) throws Exception {
+    public Map<String, Object> requestPasswordReset(String email) throws Exception {
         Optional<User> op = userRepo.findByEmail(email);
         if (op.isEmpty()) {
-            return "Si el email existe, se le envió un correo a esa dirección";
+            return Map.of("message", "Si el email existe, se le envió un correo a esa dirección");
         }
 
         User user = op.get();
@@ -200,15 +207,22 @@ public class AuthService {
         String html = "<p>Haz clic para restablecer tu contraseña: <a href=\"" + link
                 + "\">Restablecer contraseña</a></p>";
 
-        try {
-            emailService.sendHtml(email, "Reiniciar contraseña", html);
-        } catch (Exception e) {
-            System.err.println("Error sending email: " + e.getMessage());
-            System.out.println("Reset link (for development): " + link);
-        }
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                emailService.sendHtml(email, "Reiniciar contraseña", html);
+            } catch (Exception e) {
+                System.err.println("Error sending email: " + e.getMessage());
+                System.out.println("Reset link (for development): " + link);
+            }
+        });
 
-        return "Si el email existe, se le envió un correo a esa dirección";
+        Map<String, Object> res = new HashMap<>();
+        res.put("message", "Si el email existe, se le envió un correo a esa dirección");
+        res.put("resetLink", link);
+        res.put("token", token);
+        return res;
     }
+
 
     @Transactional
     public String resetPassword(String email, String token, String newPassword) {

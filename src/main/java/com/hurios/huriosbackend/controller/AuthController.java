@@ -86,8 +86,8 @@ public class AuthController {
     public ResponseEntity<?> requestPasswordReset(@RequestBody Map<String,String> body) {
         try {
             String email = body.get("email");
-            String msg = authService.requestPasswordReset(email);
-            return ResponseEntity.ok(Map.of("message", msg));
+            Map<String, Object> res = authService.requestPasswordReset(email);
+            return ResponseEntity.ok(res);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
         }
@@ -101,7 +101,7 @@ public class AuthController {
         String token = body.get("token");
         String newPassword = body.get("newPassword");
         String msg = authService.resetPassword(email, token, newPassword);
-        if ("Contraseña actualizada".equals(msg)) {
+        if (msg != null && msg.startsWith("Contraseña actualizada")) {
             return ResponseEntity.ok(Map.of("message", msg));
         }
         return ResponseEntity.badRequest().body(Map.of("error", msg));

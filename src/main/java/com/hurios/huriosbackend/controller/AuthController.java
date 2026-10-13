@@ -93,6 +93,19 @@ public class AuthController {
         }
     }
 
+    // POST /auth/verify-reset-code
+    // body: { "email": "...", "code": "..." }
+    @PostMapping("/verify-reset-code")
+    public ResponseEntity<?> verifyResetCode(@RequestBody Map<String,String> body) {
+        String email = body.get("email");
+        String code = body.get("code");
+        boolean valid = authService.verifyResetCode(email, code);
+        if (valid) {
+            return ResponseEntity.ok(Map.of("ok", true, "message", "Código verificado correctamente"));
+        }
+        return ResponseEntity.badRequest().body(Map.of("ok", false, "error", "Código inválido o expirado"));
+    }
+
     // POST /auth/reset-password
     // body: { "email": "...", "token": "...", "newPassword": "..." }
     @PostMapping("/reset-password")

@@ -191,38 +191,61 @@ public class AuthService {
     public Map<String, Object> requestPasswordReset(String email) throws Exception {
         Optional<User> op = userRepo.findByEmail(email);
         if (op.isEmpty()) {
-            return Map.of("message", "Si el email existe, se le envió un correo a esa dirección");
+            return Map.of("ok", false, "message", "Usuario no encontrado con ese correo.");
         }
 
         User user = op.get();
-        String token = UUID.randomUUID().toString();
+        String code = String.valueOf((int) (100000 + Math.random() * 900000));
         PasswordReset pr = new PasswordReset();
         pr.setUser(user);
-        pr.setToken(token);
-        pr.setExpiresAt(LocalDateTime.now().plusHours(1));
+        pr.setToken(code);
+        pr.setExpiresAt(LocalDateTime.now().plusMinutes(30));
         resetRepo.save(pr);
 
-        String link = frontendUrl() + "/new-password?token=" + token + "&email="
-                + java.net.URLEncoder.encode(email, StandardCharsets.UTF_8);
-        String html = "<p>Haz clic para restablecer tu contraseña: <a href=\"" + link
-                + "\">Restablecer contraseña</a></p>";
+        String html = "<div style='font-family: Arial, sans-serif; padding: 25px; color: #1f2937; max-width: 520px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;'>"
+                + "<div style='text-align: center; margin-bottom: 20px;'>"
+                + "<h2 style='color: #1e3a8a; margin: 0; font-size: 24px;'>Hurios Rally</h2>"
+                + "<p style='color: #6b7280; font-size: 14px; margin-top: 4px;'>Recuperación de Contraseña</p>"
+                + "</div>"
+                + "<p>Hola <b>" + (user.getFullName() != null ? user.getFullName() : "Usuario") + "</b>,</p>"
+                + "<p>Has solicitado restablecer tu contraseña. Usa el siguiente código de verificación:</p>"
+                + "<div style='background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); padding: 20px; border-radius: 10px; text-align: center; margin: 25px 0; border: 1px dashed #3b82f6;'>"
+                + "<span style='font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #1d4ed8; font-family: monospace;'>" + code + "</span>"
+                + "</div>"
+                + "<p style='font-size: 14px; color: #4b5563;'>Ingresa este código de 6 dígitos en la aplicación para crear tu nueva contraseña. Este código expirará en 30 minutos.</p>"
+                + "<hr style='border: none; border-top: 1px solid #e5e7eb; margin: 25px 0;'/>"
+                + "<p style='font-size: 12px; color: #9ca3af; text-align: center;'>Si no solicitaste este cambio, puedes ignorar este mensaje de forma segura.</p>"
+                + "</div>";
 
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try {
-                emailService.sendHtml(email, "Reiniciar contraseña", html);
+                emailService.sendHtml(email, "Código de recuperación de contraseña: " + code, html, true);
             } catch (Exception e) {
                 System.err.println("Error sending email: " + e.getMessage());
-                System.out.println("Reset link (for development): " + link);
+                System.out.println("Reset code for " + email + ": " + code);
             }
         });
 
         Map<String, Object> res = new HashMap<>();
-        res.put("message", "Si el email existe, se le envió un correo a esa dirección");
-        res.put("resetLink", link);
-        res.put("token", token);
+        res.put("ok", true);
+        res.put("message", "Código de recuperación enviado a tu correo");
+        res.put("code", code);
         return res;
     }
 
+    public boolean verifyResetCode(String email, String token) {
+        Optional<User> op = userRepo.findByEmail(email);
+        if (op.isEmpty()) {
+            return false;
+        }
+
+        User user = op.get();
+        return resetRepo.findTopByUserAndTokenAndExpiresAtAfterAndUsedFalseOrderByCreatedAtDesc(
+                user,
+                token,
+                LocalDateTime.now()
+        ).isPresent();
+    }
 
     @Transactional
     public String resetPassword(String email, String token, String newPassword) {
@@ -240,7 +263,7 @@ public class AuthService {
                 );
 
         if (rec.isEmpty()) {
-            return "Token inválido o expirado.";
+            return "Código inválido o expirado.";
         }
 
         user.setPasswordHash(passwordEncoder.encode(newPassword));

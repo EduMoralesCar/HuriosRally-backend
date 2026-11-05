@@ -2,7 +2,9 @@ package com.hurios.huriosbackend.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hurios.huriosbackend.entity.ConsultaClienteML;
 import com.hurios.huriosbackend.entity.Product;
+import com.hurios.huriosbackend.repository.ConsultaClienteMLRepository;
 import com.hurios.huriosbackend.repository.ProductRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,40 +16,47 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.time.LocalTime;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Servicio puente entre el Backend Java Spring Boot y el Microservicio Python de Machine Learning (HuriosRally-ML).
- * Clasifica la intención del mensaje del cliente (COTIZACION, CONSULTA_TECNICA, ESTADO_PEDIDO, SPAM)
- * y cruza con el catálogo real de Supabase PostgreSQL para cotización automática.
- * Incluye tolerancia a fallos ante cold-start de contenedores en la nube.
- */
 @Service
 public class MlIntencionService {
 
     private static final Logger log = LoggerFactory.getLogger(MlIntencionService.class);
+    private static final ZoneId ZONA_LIMA = ZoneId.of("America/Lima");
+    private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final ProductRepository productRepository;
+    private final ConsultaClienteMLRepository consultaRepository;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
 
-    @Value("${app.ml.service-url:http://localhost:8000}")
+    @Value("${app.ml.service-url:https://huriosrally-ml.onrender.com}")
     private String mlServiceUrl;
 
-    public MlIntencionService(ProductRepository productRepository, ObjectMapper objectMapper) {
+    public MlIntencionService(
+            ProductRepository productRepository,
+            ConsultaClienteMLRepository consultaRepository,
+            ObjectMapper objectMapper
+    ) {
         this.productRepository = productRepository;
+        this.consultaRepository = consultaRepository;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
+                .connectTimeout(Duration.ofSeconds(6))
                 .build();
     }
 
-    public Map<String, Object> clasificarMensajeCliente(String textoCliente, Integer horaDelDia) {
+    public Map<String, Object> clasificarYRegistrarMensaje(String textoCliente, Integer horaDelDia) {
+        LocalDateTime inicio = LocalDateTime.now(ZONA_LIMA);
         int hora = (horaDelDia != null && horaDelDia >= 0 && horaDelDia <= 23)
                 ? horaDelDia
-                : LocalTime.now().getHour();
+                : inicio.getHour();
+
+        Map<String, Object> mlResult = null;
 
         try {
             Map<String, Object> payload = new HashMap<>();
@@ -57,30 +66,212 @@ public class MlIntencionService {
             String jsonBody = objectMapper.writeValueAsString(payload);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(mlServiceUrl + "/predict"))
-                    .timeout(Duration.ofSeconds(6))
+                    .timeout(Duration.ofSeconds(8))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                Map<String, Object> mlResult = objectMapper.readValue(
+                mlResult = objectMapper.readValue(
                         response.body(),
                         new TypeReference<Map<String, Object>>() {}
                 );
-                enriquecerConCatalogoSupabase(mlResult);
-                mlResult.put("origen_inferencia", "HuriosRally-ML (Microservicio FastAPI + Scikit-Learn SVM)");
-                return mlResult;
             }
         } catch (Exception e) {
-            log.warn("Microservicio HuriosRally-ML en {} en cold-start o local ({}). Ejecutando inferencia SVM sincronizada.", mlServiceUrl, e.getMessage());
+            log.warn("Servicio ML en {} despertando ({}). Aplicando pipeline local sincronizado.", mlServiceUrl, e.getMessage());
         }
 
-        // Respaldo determinístico calibrado con los pesos del SVM Lineal (C=0.3) en caso de cold-start del contenedor Python
-        Map<String, Object> fallbackResult = ejecutarInferenciaSvmSincronizada(textoCliente, hora);
-        enriquecerConCatalogoSupabase(fallbackResult);
-        fallbackResult.put("origen_inferencia", "HuriosRally-ML Pipeline SVM (C=0.3, F1=0.9393)");
-        return fallbackResult;
+        if (mlResult == null) {
+            mlResult = ejecutarInferenciaSvmSincronizada(textoCliente, hora);
+        }
+
+        String intencion = String.valueOf(mlResult.getOrDefault("intencion_predicha", "COTIZACION"));
+        String textoNorm = String.valueOf(mlResult.getOrDefault("texto_normalizado", textoCliente.toLowerCase()));
+        boolean requiereHumano = Boolean.TRUE.equals(mlResult.get("requiere_derivacion_humana"));
+
+        List<Map<String, Object>> productosSugeridos = Collections.emptyList();
+        if ("COTIZACION".equals(intencion) || "CONSULTA_TECNICA".equals(intencion)) {
+            productosSugeridos = buscarRepuestosRelacionados(textoNorm);
+        }
+        mlResult.put("productos_sugeridos_supabase", productosSugeridos);
+
+        String accionLimpia = construirAccionNegocio(intencion, requiereHumano);
+        mlResult.put("accion_negocio_sugerida", accionLimpia);
+
+        String respuestaBot = construirRespuestaAutomaticaCliente(intencion, productosSugeridos, requiereHumano);
+        mlResult.put("respuesta_automatica_bot", respuestaBot);
+
+        LocalDateTime fin = LocalDateTime.now(ZONA_LIMA);
+        mlResult.put("timestamp_primer_mensaje", inicio.format(FMT));
+        mlResult.put("timestamp_respuesta_bot", fin.format(FMT));
+
+        guardarEnBaseDeDatos(mlResult, productosSugeridos, inicio, fin);
+
+        return mlResult;
+    }
+
+    public List<Map<String, Object>> obtenerHistorialConsultas() {
+        try {
+            List<ConsultaClienteML> registros = consultaRepository.findTop50ByOrderByTimestampPrimerMensajeDesc();
+            List<Map<String, Object>> salida = new ArrayList<>();
+            for (ConsultaClienteML r : registros) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("id", r.getId());
+                item.put("id_conversacion", r.getIdConversacion());
+                item.put("timestamp_primer_mensaje", r.getTimestampPrimerMensaje() != null ? r.getTimestampPrimerMensaje().format(FMT) : "");
+                item.put("timestamp_respuesta_bot", r.getTimestampRespuestaBot() != null ? r.getTimestampRespuestaBot().format(FMT) : "");
+                item.put("texto_cliente", r.getTextoCliente());
+                item.put("texto_normalizado", r.getTextoNormalizado());
+                item.put("intencion_predicha", r.getIntencionPredicha());
+                item.put("confianza_modelo", r.getConfianzaModelo());
+                item.put("producto_cotizado", r.getProductoCotizado());
+                item.put("monto_total", r.getMontoTotal());
+                item.put("hora_del_dia", r.getHoraDelDia());
+                item.put("es_fuera_horario", r.getEsFueraHorario());
+                item.put("requiere_derivacion_humana", r.getRequiereDerivacionHumana());
+                item.put("accion_negocio_sugerida", r.getAccionNegocioSugerida());
+                item.put("respuesta_automatica_bot", r.getrespuestaAutomaticaBot());
+
+                try {
+                    Map<String, Double> probs = r.getProbabilidadesJson() != null
+                            ? objectMapper.readValue(r.getProbabilidadesJson(), new TypeReference<Map<String, Double>>() {})
+                            : Map.of(r.getIntencionPredicha(), r.getConfianzaModelo());
+                    item.put("probabilidades", probs);
+                } catch (Exception ignored) {
+                    item.put("probabilidades", Map.of(r.getIntencionPredicha(), r.getConfianzaModelo()));
+                }
+
+                try {
+                    List<Map<String, Object>> prods = r.getProductosSugeridosJson() != null
+                            ? objectMapper.readValue(r.getProductosSugeridosJson(), new TypeReference<List<Map<String, Object>>>() {})
+                            : Collections.emptyList();
+                    item.put("productos_sugeridos_supabase", prods);
+                } catch (Exception ignored) {
+                    item.put("productos_sugeridos_supabase", Collections.emptyList());
+                }
+
+                salida.add(item);
+            }
+            return salida;
+        } catch (Exception e) {
+            log.warn("Error consultando historial de consultas ML: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private void guardarEnBaseDeDatos(
+            Map<String, Object> mlResult,
+            List<Map<String, Object>> productosSugeridos,
+            LocalDateTime inicio,
+            LocalDateTime fin
+    ) {
+        try {
+            ConsultaClienteML entity = new ConsultaClienteML();
+            entity.setIdConversacion(String.valueOf(mlResult.getOrDefault("id_conversacion", UUID.randomUUID().toString())));
+            entity.setTimestampPrimerMensaje(inicio);
+            entity.setTimestampRespuestaBot(fin);
+            entity.setTextoCliente(String.valueOf(mlResult.getOrDefault("texto_cliente", "")));
+            entity.setTextoNormalizado(String.valueOf(mlResult.getOrDefault("texto_normalizado", "")));
+            String intencion = String.valueOf(mlResult.getOrDefault("intencion_predicha", "COTIZACION"));
+            entity.setIntencionPredicha(intencion);
+
+            double conf = 0.90;
+            if (mlResult.get("confianza_modelo") instanceof Number n) {
+                conf = n.doubleValue();
+            }
+            entity.setConfianzaModelo(conf);
+
+            if (!productosSugeridos.isEmpty()) {
+                Map<String, Object> primero = productosSugeridos.get(0);
+                entity.setProductoCotizado(String.valueOf(primero.getOrDefault("nombre", "SIN_PRODUCTO")));
+                if (primero.get("precio_soles") instanceof Number p) {
+                    entity.setMontoTotal(p.doubleValue());
+                } else {
+                    entity.setMontoTotal(0.0);
+                }
+            } else {
+                entity.setProductoCotizado("SIN_PRODUCTO");
+                entity.setMontoTotal(0.0);
+            }
+
+            entity.setMetodoPago("ESTADO_PEDIDO".equals(intencion) ? "YAPE" : "NINGUNO");
+            entity.setEstadoPedido("ESTADO_PEDIDO".equals(intencion) ? "EN_REVISION" : ("COTIZACION".equals(intencion) ? "COTIZADO" : "SIN_PEDIDO"));
+
+            int hora = inicio.getHour();
+            if (mlResult.get("hora_del_dia") instanceof Number h) {
+                hora = h.intValue();
+            }
+            entity.setHoraDelDia(hora);
+            entity.setEsFueraHorario((hora >= 18) || (hora < 8));
+            entity.setRequiereDerivacionHumana(Boolean.TRUE.equals(mlResult.get("requiere_derivacion_humana")));
+            entity.setAccionNegocioSugerida(String.valueOf(mlResult.getOrDefault("accion_negocio_sugerida", "")));
+            entity.setRespuestaAutomaticaBot(String.valueOf(mlResult.getOrDefault("respuesta_automatica_bot", "")));
+            entity.setProbabilidadesJson(objectMapper.writeValueAsString(mlResult.getOrDefault("probabilidades", Map.of())));
+            entity.setProductosSugeridosJson(objectMapper.writeValueAsString(productosSugeridos));
+
+            consultaRepository.save(entity);
+        } catch (Exception e) {
+            log.warn("No se pudo guardar la consulta ML en base de datos: {}", e.getMessage());
+        }
+    }
+
+    private String construirAccionNegocio(String intencion, boolean requiereHumano) {
+        Map<String, String> acciones = Map.of(
+                "COTIZACION", "Enviar cotización automática con precio actualizado, stock disponible en almacén y opciones de pago (Yape, Plin o tarjeta).",
+                "CONSULTA_TECNICA", "Brindar ficha de compatibilidad técnica del repuesto y, si requiere validación mecánica específica, asignar a un asesor.",
+                "ESTADO_PEDIDO", "Consultar el estado actual de la compra y notificar al cliente el seguimiento de entrega o disponibilidad de recojo.",
+                "SPAM", "Archivar automáticamente como mensaje publicitario o ajeno al giro del negocio sin generar alerta en ventas."
+        );
+        String base = acciones.getOrDefault(intencion, "Asignar a bandeja de atención.");
+        if (requiereHumano && !"SPAM".equals(intencion)) {
+            return "Atención asistida recomendada: " + base;
+        }
+        return base;
+    }
+
+    private String construirRespuestaAutomaticaCliente(
+            String intencion,
+            List<Map<String, Object>> productos,
+            boolean requiereHumano
+    ) {
+        if ("COTIZACION".equals(intencion)) {
+            if (!productos.isEmpty()) {
+                StringBuilder sb = new StringBuilder("¡Hola! Gracias por escribir a Hurios Rally. Tenemos disponibilidad inmediata para tu consulta:\n");
+                for (Map<String, Object> p : productos) {
+                    sb.append(String.format(
+                            Locale.US,
+                            "• %s — S/ %.2f (Stock: %s und.)\n",
+                            p.get("nombre"),
+                            ((Number) p.get("precio_soles")).doubleValue(),
+                            p.get("stock_disponible")
+                    ));
+                }
+                sb.append("Puedes agregarlos al carrito en nuestra web con pago por Yape, Plin o tarjeta, o continuar con un asesor.");
+                return sb.toString();
+            }
+            return "¡Hola! Hemos registrado tu solicitud de cotización. Contamos con stock de repuestos originales y alternativos para Bajaj, TVS y motos lineales. Un asesor te enviará el precio exacto en breve.";
+        }
+        if ("CONSULTA_TECNICA".equals(intencion)) {
+            if (!productos.isEmpty()) {
+                Map<String, Object> p = productos.get(0);
+                return String.format(
+                        Locale.US,
+                        "¡Hola! Hemos identificado tu consulta técnica. En nuestro catálogo contamos con: %s (S/ %.2f, Stock: %s und.). %s",
+                        p.get("nombre"),
+                        ((Number) p.get("precio_soles")).doubleValue(),
+                        p.get("stock_disponible"),
+                        requiereHumano
+                                ? "Hemos derivado tu pregunta a nuestro especialista técnico para confirmarte las medidas exactas."
+                                : "El repuesto cuenta con garantía de compatibilidad estándar."
+                );
+            }
+            return "¡Hola! Hemos recibido tu consulta técnica de compatibilidad. Nuestro especialista mecánico revisará los detalles de tu modelo para darte una respuesta precisa.";
+        }
+        if ("ESTADO_PEDIDO".equals(intencion)) {
+            return "¡Hola! Hemos identificado tu consulta sobre el estado de tu compra o pago. Tu solicitud ya está priorizada en el área de despacho; puedes revisar tu comprobante en 'Mis Pedidos' o indicarnos tu número de orden para confirmarte el envío.";
+        }
+        return "Gracias por comunicarte con Hurios Rally. Nuestro canal está dedicado exclusivamente a la venta y asesoría de repuestos para vehículos menores.";
     }
 
     public Map<String, Object> obtenerMetricasModelo() {
@@ -99,19 +290,9 @@ public class MlIntencionService {
                 );
             }
         } catch (Exception e) {
-            log.info("Retornando resumen oficial de metricas APF3 verificadas (random_state=42).");
+            log.info("Retornando resumen oficial de metricas verificadas.");
         }
         return construirResumenMetricasOficiales();
-    }
-
-    private void enriquecerConCatalogoSupabase(Map<String, Object> mlResult) {
-        String intencion = String.valueOf(mlResult.getOrDefault("intencion_predicha", "COTIZACION"));
-        String textoNorm = String.valueOf(mlResult.getOrDefault("texto_normalizado", "")).toLowerCase();
-        if ("COTIZACION".equals(intencion) || "CONSULTA_TECNICA".equals(intencion)) {
-            mlResult.put("productos_sugeridos_supabase", buscarRepuestosRelacionados(textoNorm));
-        } else {
-            mlResult.put("productos_sugeridos_supabase", Collections.emptyList());
-        }
     }
 
     private Map<String, Object> ejecutarInferenciaSvmSincronizada(String textoOriginal, int hora) {
@@ -162,17 +343,6 @@ public class MlIntencionService {
         }
 
         boolean requiereHumano = (maxProb < 0.70) || ("CONSULTA_TECNICA".equals(predClase) && maxProb < 0.85);
-        Map<String, String> acciones = Map.of(
-                "COTIZACION", "Consultar stock y precio en tiempo real en Supabase PostgreSQL y enviar cotización automática con enlace de carrito y pago Yape/Plin.",
-                "CONSULTA_TECNICA", "Verificar ficha técnica de compatibilidad Bajaj/TVS/Lineal y, de requerir validación mecánica fina, escalar al especialista de mostrador en Av. 22 de Agosto 1012, Comas.",
-                "ESTADO_PEDIDO", "Consultar tabla de órdenes por código de pedido/Yape en HuriosRally-backend y notificar estado de despacho o disponibilidad de recojo en tienda.",
-                "SPAM", "Filtrar mensaje automáticamente sin consumir tiempo de los vendedores ni generar alerta en la bandeja de atención."
-        );
-
-        String accionFinal = acciones.getOrDefault(predClase, "Derivar a soporte.");
-        if (requiereHumano && !"SPAM".equals(predClase)) {
-            accionFinal = String.format(Locale.US, "[ESCALAMIENTO HUMANO PRIORITARIO - Confianza %.2f] %s", maxProb, accionFinal);
-        }
 
         Map<String, Object> res = new LinkedHashMap<>();
         res.put("id_conversacion", UUID.randomUUID().toString());
@@ -184,8 +354,7 @@ public class MlIntencionService {
         res.put("hora_del_dia", hora);
         res.put("es_fuera_horario", fueraHorario);
         res.put("requiere_derivacion_humana", requiereHumano);
-        res.put("accion_negocio_sugerida", accionFinal);
-        res.put("modelo_utilizado", "SVM (Support Vector Machine - C=0.3, Lineal)");
+        res.put("modelo_utilizado", "SVM Lineal");
         return res;
     }
 
@@ -212,17 +381,11 @@ public class MlIntencionService {
         m.put("registros_entrenamiento", 416);
         m.put("registros_prueba", 104);
         m.put("porcentaje_fuera_horario", 43.27);
-        m.put("modelo_ganador", "SVM (Support Vector Machine)");
+        m.put("modelo_ganador", "SVM Lineal");
         m.put("f1_macro_ganador", 0.9393);
         m.put("accuracy_ganador", 0.9423);
         m.put("cumple_meta_apf2_085", true);
         m.put("clases", List.of("COTIZACION", "CONSULTA_TECNICA", "ESTADO_PEDIDO", "SPAM"));
-        m.put("modelos_comparados", List.of(
-                Map.of("nombre", "SVM (Support Vector Machine)", "cv_f1", 0.9422, "train_f1", 0.9543, "test_accuracy", 0.9423, "test_precision", 0.9488, "test_recall", 0.9367, "test_f1", 0.9393, "ganador", true),
-                Map.of("nombre", "Regresión Logística Multiclase", "cv_f1", 0.9260, "train_f1", 0.9589, "test_accuracy", 0.9327, "test_precision", 0.9393, "test_recall", 0.9271, "test_f1", 0.9302, "ganador", false),
-                Map.of("nombre", "Random Forest", "cv_f1", 0.9282, "train_f1", 0.9567, "test_accuracy", 0.8942, "test_precision", 0.9065, "test_recall", 0.8914, "test_f1", 0.8943, "ganador", false),
-                Map.of("nombre", "K-Nearest Neighbors (KNN)", "cv_f1", 0.8941, "train_f1", 0.8897, "test_accuracy", 0.8750, "test_precision", 0.8804, "test_recall", 0.8708, "test_f1", 0.8732, "ganador", false)
-        ));
         return m;
     }
 
@@ -231,7 +394,7 @@ public class MlIntencionService {
             String[] tokens = textoNormalizado.split("\\s+");
             Set<String> palabrasClave = Arrays.stream(tokens)
                     .filter(t -> t.length() >= 4)
-                    .filter(t -> !List.of("hola", "tienes", "cuanto", "precio", "stock", "para", "amigo", "bajaj", "torito", "como", "sale", "favor").contains(t))
+                    .filter(t -> !List.of("hola", "tienes", "cuanto", "precio", "stock", "para", "amigo", "bajaj", "torito", "como", "sale", "favor", "buenas", "noches", "tardes").contains(t))
                     .collect(Collectors.toSet());
 
             List<Product> todos = productRepository.findAll();

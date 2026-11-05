@@ -237,7 +237,7 @@ public class MlIntencionService {
     ) {
         if ("COTIZACION".equals(intencion)) {
             if (!productos.isEmpty()) {
-                StringBuilder sb = new StringBuilder("¡Hola! Gracias por escribir a Hurios Rally. Tenemos disponibilidad inmediata para tu consulta:\n");
+                StringBuilder sb = new StringBuilder("¡Hola! Gracias por escribir a Hurios Rally. Tenemos disponibilidad inmediata en almacén para tu consulta:\n\n");
                 for (Map<String, Object> p : productos) {
                     sb.append(String.format(
                             Locale.US,
@@ -247,31 +247,31 @@ public class MlIntencionService {
                             p.get("stock_disponible")
                     ));
                 }
-                sb.append("Puedes agregarlos al carrito en nuestra web con pago por Yape, Plin o tarjeta, o continuar con un asesor.");
+                sb.append("\n✅ Puedes comprarlos las 24 horas en nuestra tienda web pagando con Yape, Plin o tarjeta.\n\n💬 ¿Deseas cotizar otro repuesto? Escríbeme el nombre de la pieza o envía MENU.");
                 return sb.toString();
             }
-            return "¡Hola! Hemos registrado tu solicitud de cotización. Contamos con stock de repuestos originales y alternativos para Bajaj, TVS y motos lineales. Un asesor te enviará el precio exacto en breve.";
+            return "¡Hola! Hemos procesado tu solicitud de cotización en Hurios Rally. Contamos con repuestos para Bajaj Torito, TVS King y motos lineales.\n\n💬 Por favor escríbeme el nombre exacto de la pieza (ej. Cilindro, Embrague, Zapata de freno, Amortiguador) o envía MENU.";
         }
         if ("CONSULTA_TECNICA".equals(intencion)) {
             if (!productos.isEmpty()) {
                 Map<String, Object> p = productos.get(0);
                 return String.format(
                         Locale.US,
-                        "¡Hola! Hemos identificado tu consulta técnica. En nuestro catálogo contamos con: %s (S/ %.2f, Stock: %s und.). %s",
+                        "¡Hola! Sobre tu consulta técnica en Hurios Rally, contamos en catálogo con:\n• %s (S/ %.2f — Stock: %s und.)\n\n🔧 %s\n\n💬 ¿Tienes otra consulta técnica o deseas cotizar otra pieza? Escríbeme aquí abajo o envía MENU.",
                         p.get("nombre"),
                         ((Number) p.get("precio_soles")).doubleValue(),
                         p.get("stock_disponible"),
                         requiereHumano
-                                ? "Hemos derivado tu pregunta a nuestro especialista técnico para confirmarte las medidas exactas."
-                                : "El repuesto cuenta con garantía de compatibilidad estándar."
+                                ? "Hemos dejado registrada tu consulta para que el especialista mecánico valide las medidas específicas de tu vehículo."
+                                : "Este repuesto cuenta con garantía de compatibilidad estándar para tu modelo."
                 );
             }
-            return "¡Hola! Hemos recibido tu consulta técnica de compatibilidad. Nuestro especialista mecánico revisará los detalles de tu modelo para darte una respuesta precisa.";
+            return "¡Hola! Hemos registrado tu consulta técnica de compatibilidad en Hurios Rally. Nuestro sistema dejó priorizada tu pregunta técnica.\n\n💬 ¿Deseas consultar el precio o stock de algún repuesto adicional? Escríbeme el nombre de la pieza o envía MENU.";
         }
         if ("ESTADO_PEDIDO".equals(intencion)) {
-            return "¡Hola! Hemos identificado tu consulta sobre el estado de tu compra o pago. Tu solicitud ya está priorizada en el área de despacho; puedes revisar tu comprobante en 'Mis Pedidos' o indicarnos tu número de orden para confirmarte el envío.";
+            return "¡Hola! Hemos recibido tu consulta sobre el estado de tu pedido o pago (Yape/Plin/Tarjeta). Tu orden se encuentra registrada y priorizada en el área de despacho; puedes descargar tu comprobante electrónico en la sección 'Mis Pedidos' de la web.\n\n💬 ¿Deseas realizar otra consulta? Escríbeme o envía MENU.";
         }
-        return "Gracias por comunicarte con Hurios Rally. Nuestro canal está dedicado exclusivamente a la venta y asesoría de repuestos para vehículos menores.";
+        return "Gracias por comunicarte con Hurios Rally. Nuestro asistente automático atiende consultas de repuestos las 24 horas.";
     }
 
     public Map<String, Object> obtenerMetricasModelo() {

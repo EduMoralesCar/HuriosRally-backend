@@ -48,6 +48,7 @@ public class SecurityConfig {
                         .requestMatchers("/uploads/**").permitAll()
                         .requestMatchers("/api/images/**").permitAll()
                         .requestMatchers("/api/ml/**").permitAll()
+                        .requestMatchers("/api/realtime/**").permitAll()
 
                         //  RUTAS PROTEGIDAS
                         .requestMatchers("/payments/**").authenticated()
